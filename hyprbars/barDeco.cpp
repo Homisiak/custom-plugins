@@ -7,21 +7,17 @@
 #include <hyprland/src/managers/SeatManager.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/render/Renderer.hpp>
+#include <hyprland/src/managers/LayoutManager.hpp>
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/managers/animation/AnimationManager.hpp>
 #include <hyprland/src/protocols/LayerShell.hpp>
-#include <hyprland/src/event/EventBus.hpp>
-#include <hyprland/src/layout/LayoutManager.hpp>
 #include <pango/pangocairo.h>
-
-#include "globals.hpp"
-#include "BarPassElement.hpp"
-
 
 #include <filesystem>
 #include <algorithm>
 #include <fstream>
 #include <unordered_map>
+#include <algorithm>
 
 #include <librsvg/rsvg.h>
 
@@ -36,14 +32,19 @@ CHyprBar::CHyprBar(PHLWINDOW pWindow) : IHyprWindowDecoration(pWindow) {
     const auto         PMONITOR = pWindow->m_monitor.lock();
     PMONITOR->m_scheduledRecalc = true;
 
-    // button events
-    m_pMouseButtonCallback = Event::bus()->m_events.input.mouse.button.listen([&](IPointer::SButtonEvent e, Event::SCallbackInfo& info) { onMouseButton(info, e); });
-    m_pTouchDownCallback   = Event::bus()->m_events.input.touch.down.listen([&](ITouch::SDownEvent e, Event::SCallbackInfo& info) { onTouchDown(info, e); });
-    m_pTouchUpCallback     = Event::bus()->m_events.input.touch.up.listen([&](ITouch::SUpEvent e, Event::SCallbackInfo& info) { onTouchUp(info, e); });
+    //button events
+    m_pMouseButtonCallback = HyprlandAPI::registerCallbackDynamic(
+        PHANDLE, "mouseButton", [&](void* self, SCallbackInfo& info, std::any param) { onMouseButton(info, std::any_cast<IPointer::SButtonEvent>(param)); });
+    m_pTouchDownCallback = HyprlandAPI::registerCallbackDynamic(
+        PHANDLE, "touchDown", [&](void* self, SCallbackInfo& info, std::any param) { onTouchDown(info, std::any_cast<ITouch::SDownEvent>(param)); });
+    m_pTouchUpCallback = HyprlandAPI::registerCallbackDynamic( //
+        PHANDLE, "touchUp", [&](void* self, SCallbackInfo& info, std::any param) { onTouchUp(info, std::any_cast<ITouch::SUpEvent>(param)); });
 
-    // move events
-    m_pTouchMoveCallback = Event::bus()->m_events.input.touch.motion.listen([&](ITouch::SMotionEvent e, Event::SCallbackInfo& info) { onTouchMove(info, e); });
-    m_pMouseMoveCallback = Event::bus()->m_events.input.mouse.move.listen([&](Vector2D c, Event::SCallbackInfo& info) { onMouseMove(c); });
+    //move events
+    m_pTouchMoveCallback = HyprlandAPI::registerCallbackDynamic(
+        PHANDLE, "touchMove", [&](void* self, SCallbackInfo& info, std::any param) { onTouchMove(info, std::any_cast<ITouch::SMotionEvent>(param)); });
+    m_pMouseMoveCallback = HyprlandAPI::registerCallbackDynamic( //
+        PHANDLE, "mouseMove", [&](void* self, SCallbackInfo& info, std::any param) { onMouseMove(std::any_cast<Vector2D>(param)); });
 
     m_pTextTex    = makeShared<CTexture>();
     m_pButtonsTex = makeShared<CTexture>();
@@ -53,6 +54,11 @@ CHyprBar::CHyprBar(PHLWINDOW pWindow) : IHyprWindowDecoration(pWindow) {
 }
 
 CHyprBar::~CHyprBar() {
+    HyprlandAPI::unregisterCallback(PHANDLE, m_pMouseButtonCallback);
+    HyprlandAPI::unregisterCallback(PHANDLE, m_pTouchDownCallback);
+    HyprlandAPI::unregisterCallback(PHANDLE, m_pTouchUpCallback);
+    HyprlandAPI::unregisterCallback(PHANDLE, m_pTouchMoveCallback);
+    HyprlandAPI::unregisterCallback(PHANDLE, m_pMouseMoveCallback);
     std::erase(g_pGlobalState->bars, m_self);
 }
 
@@ -91,13 +97,12 @@ bool CHyprBar::inputIsValid() {
         (g_pSeatManager->m_seatGrab && !g_pSeatManager->m_seatGrab->accepts(m_pWindow->wlSurface()->resource())))
         return false;
 
-    const auto WINDOWATCURSOR = g_pCompositor->vectorToWindowUnified(g_pInputManager->getMouseCoordsInternal(),
-                                                                     Desktop::View::RESERVED_EXTENTS | Desktop::View::INPUT_EXTENTS | Desktop::View::ALLOW_FLOATING);
+    const auto WINDOWATCURSOR = g_pCompositor->vectorToWindowUnified(g_pInputManager->getMouseCoordsInternal(), Desktop::View::RESERVED_EXTENTS | Desktop::View::INPUT_EXTENTS | Desktop::View::ALLOW_FLOATING);
 
-    auto       focusState = Desktop::focusState();
-    auto       window     = focusState->window();
-    auto       monitor    = focusState->monitor();
-
+    auto focusState = Desktop::focusState();
+    auto window = focusState->window();
+    auto monitor = focusState->monitor();
+    
     if (WINDOWATCURSOR != m_pWindow && m_pWindow != window)
         return false;
 
@@ -121,7 +126,7 @@ bool CHyprBar::inputIsValid() {
     return true;
 }
 
-void CHyprBar::onMouseButton(Event::SCallbackInfo& info, IPointer::SButtonEvent e) {
+void CHyprBar::onMouseButton(SCallbackInfo& info, IPointer::SButtonEvent e) {
     if (!inputIsValid())
         return;
 
@@ -133,7 +138,7 @@ void CHyprBar::onMouseButton(Event::SCallbackInfo& info, IPointer::SButtonEvent 
     handleDownEvent(info, std::nullopt);
 }
 
-void CHyprBar::onTouchDown(Event::SCallbackInfo& info, ITouch::SDownEvent e) {
+void CHyprBar::onTouchDown(SCallbackInfo& info, ITouch::SDownEvent e) {
     // Don't do anything if you're already grabbed a window with another finger
     if (!inputIsValid() || e.touchID != 0)
         return;
@@ -141,7 +146,7 @@ void CHyprBar::onTouchDown(Event::SCallbackInfo& info, ITouch::SDownEvent e) {
     handleDownEvent(info, e);
 }
 
-void CHyprBar::onTouchUp(Event::SCallbackInfo& info, ITouch::SUpEvent e) {
+void CHyprBar::onTouchUp(SCallbackInfo& info, ITouch::SUpEvent e) {
     if (!m_bDragPending || !m_bTouchEv || e.touchID != m_touchId)
         return;
 
@@ -161,7 +166,7 @@ void CHyprBar::onMouseMove(Vector2D coords) {
     handleMovement();
 }
 
-void CHyprBar::onTouchMove(Event::SCallbackInfo& info, ITouch::SMotionEvent e) {
+void CHyprBar::onTouchMove(SCallbackInfo& info, ITouch::SMotionEvent e) {
     if (!m_bDragPending || !m_bTouchEv || !validMapped(m_pWindow) || e.touchID != m_touchId)
         return;
 
@@ -180,7 +185,7 @@ void CHyprBar::onTouchMove(Event::SCallbackInfo& info, ITouch::SMotionEvent e) {
     m_bDraggingThis = true;
 }
 
-void CHyprBar::handleDownEvent(Event::SCallbackInfo& info, std::optional<ITouch::SDownEvent> touchEvent) {
+void CHyprBar::handleDownEvent(SCallbackInfo& info, std::optional<ITouch::SDownEvent> touchEvent) {
     m_bTouchEv = touchEvent.has_value();
     if (m_bTouchEv)
         m_touchId = touchEvent.value().touchID;
@@ -220,7 +225,7 @@ void CHyprBar::handleDownEvent(Event::SCallbackInfo& info, std::optional<ITouch:
     }
 
     if (Desktop::focusState()->window() != PWINDOW)
-        Desktop::focusState()->fullWindowFocus(PWINDOW, Desktop::FOCUS_REASON_CLICK);
+        Desktop::focusState()->fullWindowFocus(PWINDOW);
 
     if (PWINDOW->m_isFloating)
         g_pCompositor->changeWindowZOrder(PWINDOW, true);
@@ -241,7 +246,7 @@ void CHyprBar::handleDownEvent(Event::SCallbackInfo& info, std::optional<ITouch:
     }
 }
 
-void CHyprBar::handleUpEvent(Event::SCallbackInfo& info) {
+void CHyprBar::handleUpEvent(SCallbackInfo& info) {
     if (m_pWindow.lock() != Desktop::focusState()->window())
         return;
 
@@ -352,7 +357,22 @@ void CHyprBar::renderText(SP<CTexture> out, const std::string& text, const CHypr
 }
 
 
-///
+
+
+
+
+
+
+
+
+
+
+
+
+// =====================================================
+// ICON RESOLUTION HELPERS
+// =====================================================
+
 static const std::unordered_map<std::string, std::string> ICON_OVERRIDES = {
 //    {"timeshift-gtk", "timeshift"},
 //    {"hyprsysteminfo", "hwinfo"},
@@ -535,10 +555,6 @@ static std::string findIconPath(const std::string& name) {
 
     return "";
 }
-///
-
-
-
 
 
 void CHyprBar::renderBarTitle(const Vector2D& bufferSize, const float scale) {
@@ -577,8 +593,9 @@ void CHyprBar::renderBarTitle(const Vector2D& bufferSize, const float scale) {
     cairo_set_operator(CAIRO, CAIRO_OPERATOR_CLEAR);
     cairo_paint(CAIRO);
     cairo_restore(CAIRO);
+////
 
-    ///
+    // ===== ICON =====
     std::string appID = PWINDOW->m_class;
     std::string iconName = normalizeIconName(appID);
     // overrides first
@@ -654,9 +671,9 @@ void CHyprBar::renderBarTitle(const Vector2D& bufferSize, const float scale) {
     
         cairo_restore(CAIRO);
     }
-    ///
 
 
+////
     // draw title using Pango
     PangoLayout* layout = pango_cairo_create_layout(CAIRO);
     pango_layout_set_text(layout, m_szLastTitle.c_str(), -1);
@@ -679,12 +696,10 @@ void CHyprBar::renderBarTitle(const Vector2D& bufferSize, const float scale) {
 
     int layoutWidth, layoutHeight;
     pango_layout_get_size(layout, &layoutWidth, &layoutHeight);
-    ///
     const int xOffset =
     std::string{*PALIGN} == "left"
         ? std::round(**PBARPADDING * scale + iconOffset / 1.5)
         : std::round((bufferSize.x / 2.0 - layoutWidth / PANGO_SCALE / 2.0));
-    ///
     //const int xOffset = std::string{*PALIGN} == "left" ? std::round(scaledBarPadding + (BUTTONSRIGHT ? 0 : scaledButtonsSize)) :
                                                          std::round(((bufferSize.x - scaledBorderSize) / 2.0 - layoutWidth / PANGO_SCALE / 2.0));
     const int yOffset = std::round((bufferSize.y / 2.0 - layoutHeight / PANGO_SCALE / 2.0));
@@ -766,6 +781,7 @@ void CHyprBar::renderBarButtons(const Vector2D& bufferSize, const float scale) {
         }
 
         cairo_set_source_rgba(CAIRO, color.r, color.g, color.b, color.a);
+        //cairo_arc(CAIRO, pos.x, pos.y, scaledButtonSize / 2, 0, 2 * M_PI);
         cairo_rectangle(CAIRO, pos.x - scaledButtonSize / 2, pos.y - scaledButtonSize / 2, scaledButtonSize, scaledButtonSize);
         cairo_fill(CAIRO);
 
@@ -988,7 +1004,7 @@ void CHyprBar::renderPass(PHLMONITOR pMonitor, const float& a) {
 
     // dynamic updates change the extents
     if (m_iLastHeight != **PHEIGHT) {
-        PWINDOW->layoutTarget()->recalc();
+        g_pLayoutManager->getCurrentLayout()->recalculateWindow(PWINDOW);
         m_iLastHeight = **PHEIGHT;
     }
 }
