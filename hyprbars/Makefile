@@ -6,7 +6,7 @@ else
 endif
 
 CXXFLAGS = -shared -fPIC -g -std=c++2b -Wno-c++11-narrowing
-INCLUDES = `pkg-config --cflags pixman-1 libdrm hyprland pangocairo libinput libudev wayland-server xkbcommon`
+INCLUDES = `pkg-config --cflags pixman-1 libdrm hyprland pangocairo libinput libudev wayland-server xkbcommon librsvg-2.0`
 LIBS = `pkg-config --libs pangocairo`
 
 SRC = main.cpp barDeco.cpp BarPassElement.cpp
