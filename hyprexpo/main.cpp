@@ -10,6 +10,7 @@
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/managers/input/trackpad/GestureTypes.hpp>
 #include <hyprland/src/managers/input/trackpad/TrackpadGestures.hpp>
+#include <hyprland/src/event/EventBus.hpp>
 
 #include <hyprutils/string/ConstVarList.hpp>
 using namespace Hyprutils::String;
@@ -33,7 +34,9 @@ APICALL EXPORT std::string PLUGIN_API_VERSION() {
     return HYPRLAND_API_VERSION;
 }
 
-static bool renderingOverview = false;
+static bool       renderingOverview = false;
+
+const std::string KEYWORD_EXPO_GESTURE = "hyprexpo-gesture";
 
 //
 static void hkRenderWorkspace(void* thisptr, PHLMONITOR pMonitor, PHLWORKSPACE pWorkspace, timespec* now, const CBox& geometry) {
@@ -137,9 +140,17 @@ static Hyprlang::CParseResult expoGestureKeyword(const char* LHS, const char* RH
         return result;
     }
 
-    int      startDataIdx = 2;
-    uint32_t modMask      = 0;
-    float    deltaScale   = 1.F;
+    int      startDataIdx   = 2;
+    uint32_t modMask        = 0;
+    float    deltaScale     = 1.F;
+    bool     disableInhibit = false;
+
+    for (const auto arg : std::string(LHS).substr(KEYWORD_EXPO_GESTURE.size())) {
+        switch (arg) {
+            case 'p': disableInhibit = true; break;
+            default: result.setError("hyprexpo-gesture: invalid flag"); return result;
+        }
+    }
 
     while (true) {
 
@@ -164,9 +175,9 @@ static Hyprlang::CParseResult expoGestureKeyword(const char* LHS, const char* RH
     std::expected<void, std::string> resultFromGesture;
 
     if (data[startDataIdx] == "expo")
-        resultFromGesture = g_pTrackpadGestures->addGesture(makeUnique<CExpoGesture>(), fingerCount, direction, modMask, deltaScale);
+        resultFromGesture = g_pTrackpadGestures->addGesture(makeUnique<CExpoGesture>(), fingerCount, direction, modMask, deltaScale, disableInhibit);
     else if (data[startDataIdx] == "unset")
-        resultFromGesture = g_pTrackpadGestures->removeGesture(fingerCount, direction, modMask, deltaScale);
+        resultFromGesture = g_pTrackpadGestures->removeGesture(fingerCount, direction, modMask, deltaScale, disableInhibit);
     else {
         result.setError(std::format("Invalid gesture: {}", data[startDataIdx]).c_str());
         return result;
@@ -224,7 +235,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         throw std::runtime_error("[he] Failed initializing hooks");
     }
 
-    static auto P = HyprlandAPI::registerCallbackDynamic(PHANDLE, "preRender", [](void* self, SCallbackInfo& info, std::any param) {
+    static auto P = Event::bus()->m_events.render.pre.listen([](PHLMONITOR) {
         if (!g_pOverview)
             return;
         g_pOverview->onPreRender();
@@ -232,7 +243,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     HyprlandAPI::addDispatcherV2(PHANDLE, "hyprexpo:expo", ::onExpoDispatcher);
 
-    HyprlandAPI::addConfigKeyword(PHANDLE, "hyprexpo-gesture", ::expoGestureKeyword, {});
+    HyprlandAPI::addConfigKeyword(PHANDLE, KEYWORD_EXPO_GESTURE, ::expoGestureKeyword, {true});
 
     HyprlandAPI::addConfigValue(PHANDLE, "plugin:hyprexpo:columns", Hyprlang::INT{3});
     HyprlandAPI::addConfigValue(PHANDLE, "plugin:hyprexpo:gap_size", Hyprlang::INT{5});

@@ -7,19 +7,12 @@
 #include <hyprland/src/managers/SeatManager.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/render/Renderer.hpp>
-#include <hyprland/src/managers/LayoutManager.hpp>
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/managers/animation/AnimationManager.hpp>
 #include <hyprland/src/protocols/LayerShell.hpp>
+#include <hyprland/src/event/EventBus.hpp>
+#include <hyprland/src/layout/LayoutManager.hpp>
 #include <pango/pangocairo.h>
-
-#include <filesystem>
-#include <algorithm>
-#include <fstream>
-#include <unordered_map>
-#include <algorithm>
-
-#include <librsvg/rsvg.h>
 
 #include "globals.hpp"
 #include "BarPassElement.hpp"
@@ -32,19 +25,14 @@ CHyprBar::CHyprBar(PHLWINDOW pWindow) : IHyprWindowDecoration(pWindow) {
     const auto         PMONITOR = pWindow->m_monitor.lock();
     PMONITOR->m_scheduledRecalc = true;
 
-    //button events
-    m_pMouseButtonCallback = HyprlandAPI::registerCallbackDynamic(
-        PHANDLE, "mouseButton", [&](void* self, SCallbackInfo& info, std::any param) { onMouseButton(info, std::any_cast<IPointer::SButtonEvent>(param)); });
-    m_pTouchDownCallback = HyprlandAPI::registerCallbackDynamic(
-        PHANDLE, "touchDown", [&](void* self, SCallbackInfo& info, std::any param) { onTouchDown(info, std::any_cast<ITouch::SDownEvent>(param)); });
-    m_pTouchUpCallback = HyprlandAPI::registerCallbackDynamic( //
-        PHANDLE, "touchUp", [&](void* self, SCallbackInfo& info, std::any param) { onTouchUp(info, std::any_cast<ITouch::SUpEvent>(param)); });
+    // button events
+    m_pMouseButtonCallback = Event::bus()->m_events.input.mouse.button.listen([&](IPointer::SButtonEvent e, Event::SCallbackInfo& info) { onMouseButton(info, e); });
+    m_pTouchDownCallback   = Event::bus()->m_events.input.touch.down.listen([&](ITouch::SDownEvent e, Event::SCallbackInfo& info) { onTouchDown(info, e); });
+    m_pTouchUpCallback     = Event::bus()->m_events.input.touch.up.listen([&](ITouch::SUpEvent e, Event::SCallbackInfo& info) { onTouchUp(info, e); });
 
-    //move events
-    m_pTouchMoveCallback = HyprlandAPI::registerCallbackDynamic(
-        PHANDLE, "touchMove", [&](void* self, SCallbackInfo& info, std::any param) { onTouchMove(info, std::any_cast<ITouch::SMotionEvent>(param)); });
-    m_pMouseMoveCallback = HyprlandAPI::registerCallbackDynamic( //
-        PHANDLE, "mouseMove", [&](void* self, SCallbackInfo& info, std::any param) { onMouseMove(std::any_cast<Vector2D>(param)); });
+    // move events
+    m_pTouchMoveCallback = Event::bus()->m_events.input.touch.motion.listen([&](ITouch::SMotionEvent e, Event::SCallbackInfo& info) { onTouchMove(info, e); });
+    m_pMouseMoveCallback = Event::bus()->m_events.input.mouse.move.listen([&](Vector2D c, Event::SCallbackInfo& info) { onMouseMove(c); });
 
     m_pTextTex    = makeShared<CTexture>();
     m_pButtonsTex = makeShared<CTexture>();
@@ -54,11 +42,6 @@ CHyprBar::CHyprBar(PHLWINDOW pWindow) : IHyprWindowDecoration(pWindow) {
 }
 
 CHyprBar::~CHyprBar() {
-    HyprlandAPI::unregisterCallback(PHANDLE, m_pMouseButtonCallback);
-    HyprlandAPI::unregisterCallback(PHANDLE, m_pTouchDownCallback);
-    HyprlandAPI::unregisterCallback(PHANDLE, m_pTouchUpCallback);
-    HyprlandAPI::unregisterCallback(PHANDLE, m_pTouchMoveCallback);
-    HyprlandAPI::unregisterCallback(PHANDLE, m_pMouseMoveCallback);
     std::erase(g_pGlobalState->bars, m_self);
 }
 
@@ -97,12 +80,13 @@ bool CHyprBar::inputIsValid() {
         (g_pSeatManager->m_seatGrab && !g_pSeatManager->m_seatGrab->accepts(m_pWindow->wlSurface()->resource())))
         return false;
 
-    const auto WINDOWATCURSOR = g_pCompositor->vectorToWindowUnified(g_pInputManager->getMouseCoordsInternal(), Desktop::View::RESERVED_EXTENTS | Desktop::View::INPUT_EXTENTS | Desktop::View::ALLOW_FLOATING);
+    const auto WINDOWATCURSOR = g_pCompositor->vectorToWindowUnified(g_pInputManager->getMouseCoordsInternal(),
+                                                                     Desktop::View::RESERVED_EXTENTS | Desktop::View::INPUT_EXTENTS | Desktop::View::ALLOW_FLOATING);
 
-    auto focusState = Desktop::focusState();
-    auto window = focusState->window();
-    auto monitor = focusState->monitor();
-    
+    auto       focusState = Desktop::focusState();
+    auto       window     = focusState->window();
+    auto       monitor    = focusState->monitor();
+
     if (WINDOWATCURSOR != m_pWindow && m_pWindow != window)
         return false;
 
@@ -126,7 +110,7 @@ bool CHyprBar::inputIsValid() {
     return true;
 }
 
-void CHyprBar::onMouseButton(SCallbackInfo& info, IPointer::SButtonEvent e) {
+void CHyprBar::onMouseButton(Event::SCallbackInfo& info, IPointer::SButtonEvent e) {
     if (!inputIsValid())
         return;
 
@@ -138,7 +122,7 @@ void CHyprBar::onMouseButton(SCallbackInfo& info, IPointer::SButtonEvent e) {
     handleDownEvent(info, std::nullopt);
 }
 
-void CHyprBar::onTouchDown(SCallbackInfo& info, ITouch::SDownEvent e) {
+void CHyprBar::onTouchDown(Event::SCallbackInfo& info, ITouch::SDownEvent e) {
     // Don't do anything if you're already grabbed a window with another finger
     if (!inputIsValid() || e.touchID != 0)
         return;
@@ -146,7 +130,7 @@ void CHyprBar::onTouchDown(SCallbackInfo& info, ITouch::SDownEvent e) {
     handleDownEvent(info, e);
 }
 
-void CHyprBar::onTouchUp(SCallbackInfo& info, ITouch::SUpEvent e) {
+void CHyprBar::onTouchUp(Event::SCallbackInfo& info, ITouch::SUpEvent e) {
     if (!m_bDragPending || !m_bTouchEv || e.touchID != m_touchId)
         return;
 
@@ -166,7 +150,7 @@ void CHyprBar::onMouseMove(Vector2D coords) {
     handleMovement();
 }
 
-void CHyprBar::onTouchMove(SCallbackInfo& info, ITouch::SMotionEvent e) {
+void CHyprBar::onTouchMove(Event::SCallbackInfo& info, ITouch::SMotionEvent e) {
     if (!m_bDragPending || !m_bTouchEv || !validMapped(m_pWindow) || e.touchID != m_touchId)
         return;
 
@@ -185,7 +169,7 @@ void CHyprBar::onTouchMove(SCallbackInfo& info, ITouch::SMotionEvent e) {
     m_bDraggingThis = true;
 }
 
-void CHyprBar::handleDownEvent(SCallbackInfo& info, std::optional<ITouch::SDownEvent> touchEvent) {
+void CHyprBar::handleDownEvent(Event::SCallbackInfo& info, std::optional<ITouch::SDownEvent> touchEvent) {
     m_bTouchEv = touchEvent.has_value();
     if (m_bTouchEv)
         m_touchId = touchEvent.value().touchID;
@@ -225,7 +209,7 @@ void CHyprBar::handleDownEvent(SCallbackInfo& info, std::optional<ITouch::SDownE
     }
 
     if (Desktop::focusState()->window() != PWINDOW)
-        Desktop::focusState()->fullWindowFocus(PWINDOW);
+        Desktop::focusState()->fullWindowFocus(PWINDOW, Desktop::FOCUS_REASON_CLICK);
 
     if (PWINDOW->m_isFloating)
         g_pCompositor->changeWindowZOrder(PWINDOW, true);
@@ -246,7 +230,7 @@ void CHyprBar::handleDownEvent(SCallbackInfo& info, std::optional<ITouch::SDownE
     }
 }
 
-void CHyprBar::handleUpEvent(SCallbackInfo& info) {
+void CHyprBar::handleUpEvent(Event::SCallbackInfo& info) {
     if (m_pWindow.lock() != Desktop::focusState()->window())
         return;
 
@@ -356,207 +340,6 @@ void CHyprBar::renderText(SP<CTexture> out, const std::string& text, const CHypr
     cairo_surface_destroy(CAIROSURFACE);
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-// =====================================================
-// ICON RESOLUTION HELPERS
-// =====================================================
-
-static const std::unordered_map<std::string, std::string> ICON_OVERRIDES = {
-//    {"timeshift-gtk", "timeshift"},
-//    {"hyprsysteminfo", "hwinfo"},
-};
-
-
-static std::string normalizeDesktopIconName(std::string name) {
-    if (name.ends_with(".png")) name.resize(name.size() - 4);
-    if (name.ends_with(".svg")) name.resize(name.size() - 4);
-
-    return name;
-}
-
-
-static std::string normalizeIconName(std::string name) {
-    std::transform(name.begin(), name.end(), name.begin(), ::tolower);
-
-    if (name.starts_with("org."))
-        name = name.substr(4);
-
-    if (name.starts_with("com."))
-        name = name.substr(4);
-
-    return name;
-}
-
-static std::string trim(std::string s) {
-    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
-        s.pop_back();
-    size_t i = 0;
-    while (i < s.size() && s[i] == ' ')
-        i++;
-    return s.substr(i);
-}
-
-static std::string readDesktopIcon(const std::filesystem::path& file) {
-    std::ifstream in(file);
-    if (!in.good())
-        return "";
-
-    std::string line;
-    while (std::getline(in, line)) {
-        line = trim(line);
-        if (line.starts_with("Icon="))
-            return line.substr(5);
-    }
-    return "";
-}
-
-static std::string findDesktopIcon(const std::string& winClass) {
-    std::vector<std::filesystem::path> roots;
-
-    if (const char* home = getenv("HOME"))
-        roots.emplace_back(std::string(home) + "/.local/share/applications");
-
-    roots.emplace_back("/usr/share/applications");
-
-    for (const auto& root : roots) {
-        if (!std::filesystem::exists(root))
-            continue;
-
-        for (const auto& entry : std::filesystem::directory_iterator(root)) {
-            if (!entry.is_regular_file())
-                continue;
-
-            if (entry.path().extension() != ".desktop")
-                continue;
-
-            auto icon = readDesktopIcon(entry.path());
-            if (!icon.empty() &&
-                normalizeIconName(entry.path().stem().string()) == normalizeIconName(winClass))
-                return icon;
-        }
-    }
-
-    return "";
-}
-
-static std::string findIconInTheme(const std::filesystem::path& themePath, const std::string& name) {
-    const std::vector<std::string> exts = {".svg", ".png"};
-
-    // Layout A: <theme>/{scalable/<context>/, 48x48/<context>/}/...   (most themes)
-    // We only care about apps icons.
-    for (const auto& ext : exts) {
-        auto p = themePath / "scalable" / "apps" / (name + ext);
-        if (std::filesystem::exists(p))
-            return p.string();
-    }
-
-    if (std::filesystem::exists(themePath) && std::filesystem::is_directory(themePath)) {
-        for (const auto& dir : std::filesystem::directory_iterator(themePath)) {
-            if (!dir.is_directory())
-                continue;
-
-            // e.g. 16x16, 48x48, 64x64, 256x256
-            auto appsDir = dir.path() / "apps";
-            if (!std::filesystem::exists(appsDir))
-                continue;
-
-            for (const auto& ext : exts) {
-                auto p = appsDir / (name + ext);
-                if (std::filesystem::exists(p))
-                    return p.string();
-            }
-        }
-    }
-
-    // Layout B: <theme>/apps/<size>/<name>.(png|svg)  (Breeze / KDE style)
-    auto appsRoot = themePath / "apps";
-    if (std::filesystem::exists(appsRoot) && std::filesystem::is_directory(appsRoot)) {
-
-        // scalable
-        for (const auto& ext : exts) {
-            auto p = appsRoot / "scalable" / (name + ext);
-            if (std::filesystem::exists(p))
-                return p.string();
-        }
-
-        // numeric sizes (16, 22, 32, 48, 64, ...)
-        for (const auto& sizeDir : std::filesystem::directory_iterator(appsRoot)) {
-            if (!sizeDir.is_directory())
-                continue;
-
-            for (const auto& ext : exts) {
-                auto p = sizeDir.path() / (name + ext);
-                if (std::filesystem::exists(p))
-                    return p.string();
-            }
-        }
-    }
-
-    return "";
-}
-
-static std::string findIconPath(const std::string& name) {
-    const std::vector<std::string> exts = {".svg", ".png"};
-
-    // search bases (user first, then system)
-    std::vector<std::filesystem::path> bases;
-    if (const char* home = getenv("HOME")) {
-        bases.emplace_back(std::string(home) + "/.local/share/icons");
-        bases.emplace_back(std::string(home) + "/.icons");
-    }
-    bases.emplace_back("/usr/share/icons");
-
-    // 1) PRIORITY: hicolor
-    for (const auto& base : bases) {
-        auto hicolor = base / "hicolor";
-        if (std::filesystem::exists(hicolor) && std::filesystem::is_directory(hicolor)) {
-            auto p = findIconInTheme(hicolor, name);
-            if (!p.empty())
-                return p;
-        }
-    }
-
-    // 2) fallback: other themes
-    for (const auto& base : bases) {
-        if (!std::filesystem::exists(base) || !std::filesystem::is_directory(base))
-            continue;
-
-        for (const auto& theme : std::filesystem::directory_iterator(base)) {
-            if (!theme.is_directory())
-                continue;
-
-            if (theme.path().filename() == "hicolor")
-                continue;
-
-            auto p = findIconInTheme(theme.path(), name);
-            if (!p.empty())
-                return p;
-        }
-    }
-
-    // 3) pixmaps last
-    for (const auto& ext : exts) {
-        auto p = std::filesystem::path("/usr/share/pixmaps") / (name + ext);
-        if (std::filesystem::exists(p))
-            return p.string();
-    }
-
-    return "";
-}
-
-
 void CHyprBar::renderBarTitle(const Vector2D& bufferSize, const float scale) {
     static auto* const PCOLOR            = (Hyprlang::INT* const*)HyprlandAPI::getConfigValue(PHANDLE, "plugin:hyprbars:col.text")->getDataStaticPtr();
     static auto* const PSIZE             = (Hyprlang::INT* const*)HyprlandAPI::getConfigValue(PHANDLE, "plugin:hyprbars:bar_text_size")->getDataStaticPtr();
@@ -593,87 +376,7 @@ void CHyprBar::renderBarTitle(const Vector2D& bufferSize, const float scale) {
     cairo_set_operator(CAIRO, CAIRO_OPERATOR_CLEAR);
     cairo_paint(CAIRO);
     cairo_restore(CAIRO);
-////
 
-    // ===== ICON =====
-    std::string appID = PWINDOW->m_class;
-    std::string iconName = normalizeIconName(appID);
-    // overrides first
-    auto it = ICON_OVERRIDES.find(iconName);
-    if (it != ICON_OVERRIDES.end())
-        iconName = it->second;
-    
-    // try desktop file
-    std::string desktopIcon = findDesktopIcon(PWINDOW->m_class);
-    
-    //if (!desktopIcon.empty())
-    //    iconName = normalizeIconName(desktopIcon);
-
-    if (!desktopIcon.empty())
-        iconName = normalizeDesktopIconName(desktopIcon);
-
-
-    // resolve to actual file
-    std::string iconPath = findIconPath(iconName);
-
-    const int ICON_SIZE = 20; // static size
-    const int ICON_PADDING = 6;
-
-    int iconOffset = 0;
-
-    if (!iconPath.empty()) {
-        cairo_save(CAIRO);
-
-        cairo_translate(CAIRO,
-            ICON_PADDING,
-            (bufferSize.y - ICON_SIZE) / 2.0
-        );
-    
-        if (iconPath.ends_with(".svg")) {
-            GError* error = nullptr;
-            RsvgHandle* handle = rsvg_handle_new_from_file(iconPath.c_str(), &error);
-    
-            if (handle) {
-                RsvgDimensionData dim;
-                rsvg_handle_get_dimensions(handle, &dim);
-    
-                double scaleX = (double)ICON_SIZE / dim.width;
-                double scaleY = (double)ICON_SIZE / dim.height;
-    
-                cairo_scale(CAIRO, scaleX, scaleY);
-                rsvg_handle_render_cairo(handle, CAIRO);
-    
-                g_object_unref(handle);
-                iconOffset = ICON_SIZE + ICON_PADDING * 2;
-            }
-    
-            if (error)
-                g_error_free(error);
-    
-        } else if (iconPath.ends_with(".png")) {
-            cairo_surface_t* iconSurface = cairo_image_surface_create_from_png(iconPath.c_str());
-    
-            if (cairo_surface_status(iconSurface) == CAIRO_STATUS_SUCCESS) {
-                cairo_scale(
-                    CAIRO,
-                    (double)ICON_SIZE / cairo_image_surface_get_width(iconSurface),
-                    (double)ICON_SIZE / cairo_image_surface_get_height(iconSurface)
-                );
-    
-                cairo_set_source_surface(CAIRO, iconSurface, 0, 0);
-                cairo_paint(CAIRO);
-    
-                iconOffset = ICON_SIZE + ICON_PADDING * 2;
-            }
-    
-            cairo_surface_destroy(iconSurface);
-        }
-    
-        cairo_restore(CAIRO);
-    }
-
-
-////
     // draw title using Pango
     PangoLayout* layout = pango_cairo_create_layout(CAIRO);
     pango_layout_set_text(layout, m_szLastTitle.c_str(), -1);
@@ -696,11 +399,7 @@ void CHyprBar::renderBarTitle(const Vector2D& bufferSize, const float scale) {
 
     int layoutWidth, layoutHeight;
     pango_layout_get_size(layout, &layoutWidth, &layoutHeight);
-    const int xOffset =
-    std::string{*PALIGN} == "left"
-        ? std::round(**PBARPADDING * scale + iconOffset / 1.5)
-        : std::round((bufferSize.x / 2.0 - layoutWidth / PANGO_SCALE / 2.0));
-    //const int xOffset = std::string{*PALIGN} == "left" ? std::round(scaledBarPadding + (BUTTONSRIGHT ? 0 : scaledButtonsSize)) :
+    const int xOffset = std::string{*PALIGN} == "left" ? std::round(scaledBarPadding + (BUTTONSRIGHT ? 0 : scaledButtonsSize)) :
                                                          std::round(((bufferSize.x - scaledBorderSize) / 2.0 - layoutWidth / PANGO_SCALE / 2.0));
     const int yOffset = std::round((bufferSize.y / 2.0 - layoutHeight / PANGO_SCALE / 2.0));
 
@@ -781,8 +480,7 @@ void CHyprBar::renderBarButtons(const Vector2D& bufferSize, const float scale) {
         }
 
         cairo_set_source_rgba(CAIRO, color.r, color.g, color.b, color.a);
-        //cairo_arc(CAIRO, pos.x, pos.y, scaledButtonSize / 2, 0, 2 * M_PI);
-        cairo_rectangle(CAIRO, pos.x - scaledButtonSize / 2, pos.y - scaledButtonSize / 2, scaledButtonSize, scaledButtonSize);
+        cairo_arc(CAIRO, pos.x, pos.y, scaledButtonSize / 2, 0, 2 * M_PI);
         cairo_fill(CAIRO);
 
         offset += scaledButtonsPad + scaledButtonSize;
@@ -1004,7 +702,7 @@ void CHyprBar::renderPass(PHLMONITOR pMonitor, const float& a) {
 
     // dynamic updates change the extents
     if (m_iLastHeight != **PHEIGHT) {
-        g_pLayoutManager->getCurrentLayout()->recalculateWindow(PWINDOW);
+        PWINDOW->layoutTarget()->recalc();
         m_iLastHeight = **PHEIGHT;
     }
 }
