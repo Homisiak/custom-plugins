@@ -565,6 +565,17 @@ void CHyprBar::renderBarTitle(const Vector2D& bufferSize, const float scale) {
     const auto       scaledBarPadding  = **PBARPADDING * scale;
 
 
+    const CHyprColor COLOR = m_bForcedTitleColor.value_or(**PCOLOR);
+
+    const auto       CAIROSURFACE = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, bufferSize.x, bufferSize.y);
+    const auto       CAIRO        = cairo_create(CAIROSURFACE);
+
+    // clear the pixmap
+    cairo_save(CAIRO);
+    cairo_set_operator(CAIRO, CAIRO_OPERATOR_CLEAR);
+    cairo_paint(CAIRO);
+    cairo_restore(CAIRO);
+
 ////
 
     // ===== ICON =====
@@ -648,16 +659,6 @@ void CHyprBar::renderBarTitle(const Vector2D& bufferSize, const float scale) {
 ////
 
 
-    const CHyprColor COLOR = m_bForcedTitleColor.value_or(**PCOLOR);
-
-    const auto       CAIROSURFACE = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, bufferSize.x, bufferSize.y);
-    const auto       CAIRO        = cairo_create(CAIROSURFACE);
-
-    // clear the pixmap
-    cairo_save(CAIRO);
-    cairo_set_operator(CAIRO, CAIRO_OPERATOR_CLEAR);
-    cairo_paint(CAIRO);
-    cairo_restore(CAIRO);
 
     // draw title using Pango
     PangoLayout* layout = pango_cairo_create_layout(CAIRO);
