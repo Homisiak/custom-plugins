@@ -21,7 +21,6 @@ pkg_check_modules(deps REQUIRED IMPORTED_TARGET
     pixman-1
     wayland-server
     xkbcommon
-    librsvg-2.0
 )
 target_link_libraries(hyprbars PRIVATE rt PkgConfig::deps)
 
