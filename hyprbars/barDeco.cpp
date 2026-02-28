@@ -17,6 +17,12 @@
 #include "globals.hpp"
 #include "BarPassElement.hpp"
 
+#include <filesystem>
+#include <fstream>
+#include <unordered_map>
+#include <librsvg/rsvg.h>
+
+
 CHyprBar::CHyprBar(PHLWINDOW pWindow) : IHyprWindowDecoration(pWindow) {
     m_pWindow = pWindow;
 
@@ -340,6 +346,201 @@ void CHyprBar::renderText(SP<CTexture> out, const std::string& text, const CHypr
     cairo_surface_destroy(CAIROSURFACE);
 }
 
+
+
+
+///
+// =====================================================
+// ICON RESOLUTION HELPERS
+// =====================================================
+
+static const std::unordered_map<std::string, std::string> ICON_OVERRIDES = {
+//    {"timeshift-gtk", "timeshift"},
+//    {"hyprsysteminfo", "hwinfo"},
+};
+
+
+static std::string normalizeDesktopIconName(std::string name) {
+    if (name.ends_with(".png")) name.resize(name.size() - 4);
+    if (name.ends_with(".svg")) name.resize(name.size() - 4);
+
+    return name;
+}
+
+
+static std::string normalizeIconName(std::string name) {
+    std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+
+    if (name.starts_with("org."))
+        name = name.substr(4);
+
+    if (name.starts_with("com."))
+        name = name.substr(4);
+
+    return name;
+}
+
+static std::string trim(std::string s) {
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
+        s.pop_back();
+    size_t i = 0;
+    while (i < s.size() && s[i] == ' ')
+        i++;
+    return s.substr(i);
+}
+
+static std::string readDesktopIcon(const std::filesystem::path& file) {
+    std::ifstream in(file);
+    if (!in.good())
+        return "";
+
+    std::string line;
+    while (std::getline(in, line)) {
+        line = trim(line);
+        if (line.starts_with("Icon="))
+            return line.substr(5);
+    }
+    return "";
+}
+
+static std::string findDesktopIcon(const std::string& winClass) {
+    std::vector<std::filesystem::path> roots;
+
+    if (const char* home = getenv("HOME"))
+        roots.emplace_back(std::string(home) + "/.local/share/applications");
+
+    roots.emplace_back("/usr/share/applications");
+
+    for (const auto& root : roots) {
+        if (!std::filesystem::exists(root))
+            continue;
+
+        for (const auto& entry : std::filesystem::directory_iterator(root)) {
+            if (!entry.is_regular_file())
+                continue;
+
+            if (entry.path().extension() != ".desktop")
+                continue;
+
+            auto icon = readDesktopIcon(entry.path());
+            if (!icon.empty() &&
+                normalizeIconName(entry.path().stem().string()) == normalizeIconName(winClass))
+                return icon;
+        }
+    }
+
+    return "";
+}
+
+static std::string findIconInTheme(const std::filesystem::path& themePath, const std::string& name) {
+    const std::vector<std::string> exts = {".svg", ".png"};
+
+    // Layout A: <theme>/{scalable/<context>/, 48x48/<context>/}/...   (most themes)
+    // We only care about apps icons.
+    for (const auto& ext : exts) {
+        auto p = themePath / "scalable" / "apps" / (name + ext);
+        if (std::filesystem::exists(p))
+            return p.string();
+    }
+
+    if (std::filesystem::exists(themePath) && std::filesystem::is_directory(themePath)) {
+        for (const auto& dir : std::filesystem::directory_iterator(themePath)) {
+            if (!dir.is_directory())
+                continue;
+
+            // e.g. 16x16, 48x48, 64x64, 256x256
+            auto appsDir = dir.path() / "apps";
+            if (!std::filesystem::exists(appsDir))
+                continue;
+
+            for (const auto& ext : exts) {
+                auto p = appsDir / (name + ext);
+                if (std::filesystem::exists(p))
+                    return p.string();
+            }
+        }
+    }
+
+    // Layout B: <theme>/apps/<size>/<name>.(png|svg)  (Breeze / KDE style)
+    auto appsRoot = themePath / "apps";
+    if (std::filesystem::exists(appsRoot) && std::filesystem::is_directory(appsRoot)) {
+
+        // scalable
+        for (const auto& ext : exts) {
+            auto p = appsRoot / "scalable" / (name + ext);
+            if (std::filesystem::exists(p))
+                return p.string();
+        }
+
+        // numeric sizes (16, 22, 32, 48, 64, ...)
+        for (const auto& sizeDir : std::filesystem::directory_iterator(appsRoot)) {
+            if (!sizeDir.is_directory())
+                continue;
+
+            for (const auto& ext : exts) {
+                auto p = sizeDir.path() / (name + ext);
+                if (std::filesystem::exists(p))
+                    return p.string();
+            }
+        }
+    }
+
+    return "";
+}
+
+static std::string findIconPath(const std::string& name) {
+    const std::vector<std::string> exts = {".svg", ".png"};
+
+    // search bases (user first, then system)
+    std::vector<std::filesystem::path> bases;
+    if (const char* home = getenv("HOME")) {
+        bases.emplace_back(std::string(home) + "/.local/share/icons");
+        bases.emplace_back(std::string(home) + "/.icons");
+    }
+    bases.emplace_back("/usr/share/icons");
+
+    // 1) PRIORITY: hicolor
+    for (const auto& base : bases) {
+        auto hicolor = base / "hicolor";
+        if (std::filesystem::exists(hicolor) && std::filesystem::is_directory(hicolor)) {
+            auto p = findIconInTheme(hicolor, name);
+            if (!p.empty())
+                return p;
+        }
+    }
+
+    // 2) fallback: other themes
+    for (const auto& base : bases) {
+        if (!std::filesystem::exists(base) || !std::filesystem::is_directory(base))
+            continue;
+
+        for (const auto& theme : std::filesystem::directory_iterator(base)) {
+            if (!theme.is_directory())
+                continue;
+
+            if (theme.path().filename() == "hicolor")
+                continue;
+
+            auto p = findIconInTheme(theme.path(), name);
+            if (!p.empty())
+                return p;
+        }
+    }
+
+    // 3) pixmaps last
+    for (const auto& ext : exts) {
+        auto p = std::filesystem::path("/usr/share/pixmaps") / (name + ext);
+        if (std::filesystem::exists(p))
+            return p.string();
+    }
+
+    return "";
+}
+///
+
+
+
+
 void CHyprBar::renderBarTitle(const Vector2D& bufferSize, const float scale) {
     static auto* const PCOLOR            = (Hyprlang::INT* const*)HyprlandAPI::getConfigValue(PHANDLE, "plugin:hyprbars:col.text")->getDataStaticPtr();
     static auto* const PSIZE             = (Hyprlang::INT* const*)HyprlandAPI::getConfigValue(PHANDLE, "plugin:hyprbars:bar_text_size")->getDataStaticPtr();
@@ -377,6 +578,85 @@ void CHyprBar::renderBarTitle(const Vector2D& bufferSize, const float scale) {
     cairo_paint(CAIRO);
     cairo_restore(CAIRO);
 
+////
+    // ===== ICON =====
+    std::string appID = PWINDOW->m_class;
+    std::string iconName = normalizeIconName(appID);
+    // overrides first
+    auto it = ICON_OVERRIDES.find(iconName);
+    if (it != ICON_OVERRIDES.end())
+        iconName = it->second;
+    
+    // try desktop file
+    std::string desktopIcon = findDesktopIcon(PWINDOW->m_class);
+    
+    //if (!desktopIcon.empty())
+    //    iconName = normalizeIconName(desktopIcon);
+
+    if (!desktopIcon.empty())
+        iconName = normalizeDesktopIconName(desktopIcon);
+
+
+    // resolve to actual file
+    std::string iconPath = findIconPath(iconName);
+
+    const int ICON_SIZE = 20; // static size
+    const int ICON_PADDING = 6;
+
+    int iconOffset = 0;
+
+    if (!iconPath.empty()) {
+        cairo_save(CAIRO);
+
+        cairo_translate(CAIRO,
+            ICON_PADDING,
+            (bufferSize.y - ICON_SIZE) / 2.0
+        );
+    
+        if (iconPath.ends_with(".svg")) {
+            GError* error = nullptr;
+            RsvgHandle* handle = rsvg_handle_new_from_file(iconPath.c_str(), &error);
+    
+            if (handle) {
+                RsvgDimensionData dim;
+                rsvg_handle_get_dimensions(handle, &dim);
+    
+                double scaleX = (double)ICON_SIZE / dim.width;
+                double scaleY = (double)ICON_SIZE / dim.height;
+    
+                cairo_scale(CAIRO, scaleX, scaleY);
+                rsvg_handle_render_cairo(handle, CAIRO);
+    
+                g_object_unref(handle);
+                iconOffset = ICON_SIZE + ICON_PADDING * 2;
+            }
+    
+            if (error)
+                g_error_free(error);
+    
+        } else if (iconPath.ends_with(".png")) {
+            cairo_surface_t* iconSurface = cairo_image_surface_create_from_png(iconPath.c_str());
+    
+            if (cairo_surface_status(iconSurface) == CAIRO_STATUS_SUCCESS) {
+                cairo_scale(
+                    CAIRO,
+                    (double)ICON_SIZE / cairo_image_surface_get_width(iconSurface),
+                    (double)ICON_SIZE / cairo_image_surface_get_height(iconSurface)
+                );
+    
+                cairo_set_source_surface(CAIRO, iconSurface, 0, 0);
+                cairo_paint(CAIRO);
+    
+                iconOffset = ICON_SIZE + ICON_PADDING * 2;
+            }
+    
+            cairo_surface_destroy(iconSurface);
+        }
+    
+        cairo_restore(CAIRO);
+    }
+////
+
     // draw title using Pango
     PangoLayout* layout = pango_cairo_create_layout(CAIRO);
     pango_layout_set_text(layout, m_szLastTitle.c_str(), -1);
@@ -399,7 +679,13 @@ void CHyprBar::renderBarTitle(const Vector2D& bufferSize, const float scale) {
 
     int layoutWidth, layoutHeight;
     pango_layout_get_size(layout, &layoutWidth, &layoutHeight);
-    const int xOffset = std::string{*PALIGN} == "left" ? std::round(scaledBarPadding + (BUTTONSRIGHT ? 0 : scaledButtonsSize)) :
+    ///
+    const int xOffset =
+    std::string{*PALIGN} == "left"
+        ? std::round(**PBARPADDING * scale + iconOffset / 1.5)
+        : std::round((bufferSize.x / 2.0 - layoutWidth / PANGO_SCALE / 2.0));
+    ///
+    //const int xOffset = std::string{*PALIGN} == "left" ? std::round(scaledBarPadding + (BUTTONSRIGHT ? 0 : scaledButtonsSize)) :
                                                          std::round(((bufferSize.x - scaledBorderSize) / 2.0 - layoutWidth / PANGO_SCALE / 2.0));
     const int yOffset = std::round((bufferSize.y / 2.0 - layoutHeight / PANGO_SCALE / 2.0));
 
@@ -480,7 +766,10 @@ void CHyprBar::renderBarButtons(const Vector2D& bufferSize, const float scale) {
         }
 
         cairo_set_source_rgba(CAIRO, color.r, color.g, color.b, color.a);
-        cairo_arc(CAIRO, pos.x, pos.y, scaledButtonSize / 2, 0, 2 * M_PI);
+        //cairo_arc(CAIRO, pos.x, pos.y, scaledButtonSize / 2, 0, 2 * M_PI);
+        ///
+        cairo_rectangle(CAIRO, pos.x - scaledButtonSize / 2, pos.y - scaledButtonSize / 2, scaledButtonSize, scaledButtonSize);
+        ///
         cairo_fill(CAIRO);
 
         offset += scaledButtonsPad + scaledButtonSize;
